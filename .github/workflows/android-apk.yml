@@ -10,9 +10,7 @@ jobs:
       CI: 1
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
-      # Safe dummy so build-time reads don't crash:
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
-      # 🚫 Tell expo-modules gradle plugin to skip publishing config in CI
       EXPO_SKIP_PUBLISHING: 1
       ORG_GRADLE_PROJECT_expo_skip_publishing: true
 
@@ -61,9 +59,7 @@ jobs:
               "updates": { "fallbackToCacheTimeout": 0 },
               "assetBundlePatterns": ["**/*"],
               "ios": { "supportsTablet": true },
-              "android": {
-                "package": "com.example.datawallete2e"
-              },
+              "android": { "package": "com.example.datawallete2e" },
               "web": { "bundler": "metro", "output": "static" }
             }
           }
@@ -91,9 +87,7 @@ jobs:
           android.useAndroidX=true
           android.enableJetifier=true
           kotlin.code.style=official
-          # Let expo templates know we're using Hermes
           expo.jsEngine=hermes
-          # Skip publishing config that breaks in some CI setups
           expo.skipPublishing=true
           EOF
           echo "---- android/gradle.properties ----"
@@ -106,36 +100,38 @@ jobs:
           sed -i 's/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g' android/app/build.gradle || true
           sed -i 's/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g' android/app/build.gradle || true
 
-      # ✅ Define hermesEnabled both at the root project and inside :app so any plugin can read it
-      - name: Define hermesEnabled in root and app
+      # ✅ Define hermesEnabled in root AND app without escaping issues
+      - name: Define hermesEnabled in root and app (no literal \n)
+        shell: bash
         run: |
-          # In root build.gradle, add an ext block if missing
-          if ! grep -q "ext {" android/build.gradle; then
-            echo "Adding 'ext { hermesEnabled = true }' to root android/build.gradle"
-            sed -i '1iext { hermesEnabled = true }' android/build.gradle
-          elif ! grep -q "hermesEnabled" android/build.gradle; then
-            echo "Injecting hermesEnabled into existing ext block"
-            sed -i '0,/ext {/s//ext { hermesEnabled = true\\n/' android/build.gradle
+          # Root: prepend an ext block if hermesEnabled not present
+          if ! grep -q "hermesEnabled" android/build.gradle; then
+            echo "Prepending ext { hermesEnabled = true } to android/build.gradle"
+            tmpfile=$(mktemp)
+            printf "ext {\n    hermesEnabled = true\n}\n\n" > "$tmpfile"
+            cat android/build.gradle >> "$tmpfile"
+            mv "$tmpfile" android/build.gradle
           fi
-          # In app/build.gradle, define a top-level variable too (older scripts read here)
+          # App: prepend a top-level def if missing
           if ! grep -q "^def hermesEnabled" android/app/build.gradle; then
-            echo "Adding 'def hermesEnabled = true' to app/build.gradle"
-            sed -i '1idef hermesEnabled = true' android/app/build.gradle
+            echo "Prepending 'def hermesEnabled = true' to android/app/build.gradle"
+            tmpfile=$(mktemp)
+            printf "def hermesEnabled = true\n" > "$tmpfile"
+            cat android/app/build.gradle >> "$tmpfile"
+            mv "$tmpfile" android/app/build.gradle
           fi
           echo "---- mentions of hermesEnabled ----"
-          grep -n "hermesEnabled" -n android/build.gradle android/app/build.gradle || true
+          grep -n "hermesEnabled" android/build.gradle android/app/build.gradle || true
 
-      # 🧯 Patch expo-modules-core plugin to skip publishing if env says so (avoids 'components.release' issue)
+      # 🧯 Patch expo-modules-core plugin to skip publishing in CI (avoid components.release error)
       - name: Patch expo-modules-core to skip publishing in CI
         run: |
           FILE=node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle
           if [ -f "$FILE" ]; then
             echo "Patching $FILE to guard publishing with env var"
-            # Only add once
             if ! grep -q "EXPO_SKIP_PUBLISHING" "$FILE"; then
-              # Wrap the publishing block with an if guard
-              sed -i 's/components\.release/ (System.getenv("EXPO_SKIP_PUBLISHING") == "1" ? null : components.release ) /g' "$FILE" || true
-              # Additionally, if the plugin uses components.withVariants, guard it:
+              # Replace risky references; guard them
+              sed -i 's/components\.release/(System.getenv("EXPO_SKIP_PUBLISHING") == "1" ? null : components.release)/g' "$FILE" || true
               sed -i 's/components\.withVariants/components.findByName("release") == null \? components : components.withVariants/g' "$FILE" || true
             fi
             echo "Patched (best-effort)."
