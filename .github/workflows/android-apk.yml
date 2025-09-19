@@ -10,23 +10,18 @@ jobs:
       CI: true
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
-      # Safe dummy env so build-time reads don't crash:
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show repo tree (verify files at root)
+      - name: Show repo tree
         run: |
           pwd
           ls -la
-          echo "---- package.json ----"
-          [ -f package.json ] && cat package.json || echo "NO package.json at repo root"
-          echo "---- app.json ----"
-          [ -f app.json ] && cat app.json || echo "NO app.json at repo root"
 
-      - name: Setup Node 18 (cache npm)
+      - name: Setup Node 18
         uses: actions/setup-node@v4
         with:
           node-version: 18
@@ -48,29 +43,34 @@ jobs:
             npm i
           fi
 
-      - name: Print Expo/React Native versions
+      # --- NEW: Ensure valid image assets so jimp doesn't crash ---
+      - name: Ensure valid PNG assets
         run: |
-          npx expo --version || true
-          node -p "require('./package.json').dependencies"
+          mkdir -p assets
+          # 1x1 transparent PNG (valid CRC)
+          ONEPX="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+          echo "$ONEPX" | base64 -d > assets/icon.png
+          echo "$ONEPX" | base64 -d > assets/splash.png
+          echo "$ONEPX" | base64 -d > assets/adaptive-icon.png
+          echo "$ONEPX" | base64 -d > assets/favicon.png
+          ls -l assets
 
-      - name: Validate app.json (JSON parse)
+      - name: Validate app.json
         run: node -e "JSON.parse(require('fs').readFileSync('app.json','utf8')); console.log('app.json OK')"
 
       - name: Expo doctor (non-fatal)
         run: npx expo-doctor || true
 
-      # Generate native android/ from Expo config
       - name: Prebuild (Expo → native)
         run: npx expo prebuild --platform android --non-interactive --clean
 
       - name: Ensure gradlew executable
         run: chmod +x android/gradlew
 
-      # Optional: cache Gradle to speed up and reduce flaky failures
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Build debug APK (verbose logs)
+      - name: Build debug APK (verbose)
         working-directory: android
         run: ./gradlew assembleDebug --stacktrace --info --no-daemon
 
