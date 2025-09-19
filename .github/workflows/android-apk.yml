@@ -6,34 +6,74 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    env:
+      CI: true
+      EXPO_NO_TELEMETRY: 1
+      EXPO_NO_PROMPT: 1
+      # Safe dummy env so build-time reads don't crash:
+      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Show repo tree (verify files at root)
+        run: |
+          pwd
+          ls -la
+          echo "---- package.json ----"
+          [ -f package.json ] && cat package.json || echo "NO package.json at repo root"
+          echo "---- app.json ----"
+          [ -f app.json ] && cat app.json || echo "NO app.json at repo root"
+
+      - name: Setup Node 18 (cache npm)
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm'
 
-      - name: Setup Java (Temurin 17)
+      - name: Setup Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Install Expo CLI
+      - name: Install expo-cli (optional)
         run: npm i -g expo-cli
 
       - name: Install dependencies
-        run: npm ci || npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i
+          fi
 
+      - name: Print Expo/React Native versions
+        run: |
+          npx expo --version || true
+          node -p "require('./package.json').dependencies"
+
+      - name: Validate app.json (JSON parse)
+        run: node -e "JSON.parse(require('fs').readFileSync('app.json','utf8')); console.log('app.json OK')"
+
+      - name: Expo doctor (non-fatal)
+        run: npx expo-doctor || true
+
+      # Generate native android/ from Expo config
       - name: Prebuild (Expo → native)
-        run: npx expo prebuild --non-interactive
+        run: npx expo prebuild --platform android --non-interactive --clean
 
-      - name: Build debug APK (no signing setup required)
+      - name: Ensure gradlew executable
+        run: chmod +x android/gradlew
+
+      # Optional: cache Gradle to speed up and reduce flaky failures
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build debug APK (verbose logs)
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --stacktrace --info --no-daemon
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
