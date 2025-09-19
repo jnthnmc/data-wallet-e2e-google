@@ -10,16 +10,21 @@ jobs:
       CI: 1
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
+      # Safe dummy so builds don't crash if your app reads it at build time:
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show repo tree
+      - name: Show repo tree (sanity check)
         run: |
           pwd
           ls -la
+          echo "---- package.json ----"
+          [ -f package.json ] && cat package.json || echo "NO package.json at repo root"
+          echo "---- app.json (if present) ----"
+          [ -f app.json ] && cat app.json || echo "NO app.json at repo root"
 
       - name: Setup Node 18
         uses: actions/setup-node@v4
@@ -37,15 +42,17 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f package-lock.json ]; then npm ci; else npm i; fi
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i
+          fi
 
-      # 🔧 Overwrite app.json with a MINIMAL, IMAGE-FREE config to avoid jimp/PNG processing entirely
+      # Use a minimal, image-free app.json to avoid PNG/CRC issues during prebuild
       - name: Force minimal image-free app.json
         shell: bash
         run: |
-          # backup any existing config (just in case)
           [ -f app.json ] && cp app.json app.json.bak || true
-
           cat > app.json << 'EOF'
           {
             "expo": {
@@ -64,10 +71,8 @@ jobs:
             }
           }
           EOF
-
-          echo "---- app.json (final) ----"
+          echo "---- FINAL app.json ----"
           cat app.json
-          echo "No icon/splash/adaptiveIcon fields present."
 
       - name: Validate app.json
         run: node -e "JSON.parse(require('fs').readFileSync('app.json','utf8')); console.log('app.json OK')"
@@ -81,27 +86,56 @@ jobs:
       - name: Ensure gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Setup Gradle cache
-        uses: gradle/actions/setup-gradle@v3
+      # Safe defaults for RN/AGP builds + more heap
+      - name: Write gradle.properties (safe defaults)
+        run: |
+          cat > android/gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          kotlin.code.style=official
+          EOF
+          echo "---- android/gradle.properties ----"
+          cat android/gradle.properties
 
-      # Build with verbose logs and keep going so we can upload logs even if it fails
+      # Ensure SDK levels are sane for RN 0.74 / AGP 8.x
+      - name: Patch compile/target/min SDK (if needed)
+        run: |
+          sed -i 's/compileSdkVersion *[0-9][0-9]*/compileSdkVersion 34/g' android/build.gradle || true
+          sed -i 's/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g' android/app/build.gradle || true
+          sed -i 's/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g' android/app/build.gradle || true
+          echo "---- android/app/build.gradle (sdk lines) ----"
+          grep -nE 'compileSdkVersion|minSdkVersion|targetSdkVersion|namespace|applicationId' android/app/build.gradle || true
+
+      # Build and always capture logs so we can debug if it fails
       - name: Build debug APK (verbose, save logs)
         working-directory: android
         run: |
+          ./gradlew clean
           ./gradlew assembleDebug --stacktrace --info --warning-mode all --no-daemon --scan | tee ../gradle-build.log
         continue-on-error: true
-      
-      # Extract the last error context so it's easy to read in the Actions UI
+
+      # Show the failure summary inline in Actions UI
       - name: Extract error summary from Gradle log
         if: always()
         run: |
-          echo "----- Gradle error summary (last 300 lines with key phrases) -----"
-          tail -n 300 gradle-build.log | sed -n '/FAILURE:/,$p' || true
-          echo "----- Grep common patterns -----"
-          grep -iE "(FAILURE:|What went wrong|Caused by:|A failure occurred|error: |e: |No matching variant|Duplicate class|AAPT|manifest)" gradle-build.log | tail -n 200 || true
-      
-      # Upload full logs and key files so we can diagnose precisely
-      - name: Upload build logs and gradle files
+          echo "----- LAST 300 LINES -----"
+          tail -n 300 gradle-build.log || true
+          echo "----- FAILURE BLOCK -----"
+          sed -n '/FAILURE:/,$p' gradle-build.log || true
+          echo "----- COMMON ERROR PATTERNS -----"
+          grep -nEi "(AAPT|error: |FAILURE:|What went wrong|Caused by:|Duplicate class|No matching variant|manifest)" gradle-build.log | tail -n 200 || true
+
+      # Upload APK only if it exists and build succeeded
+      - name: Upload APK (if present)
+        if: success() && hashFiles('android/app/build/outputs/apk/debug/app-debug.apk') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # Always upload logs/config for troubleshooting
+      - name: Upload debug bundle (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -115,9 +149,3 @@ jobs:
             android/app/src/main/AndroidManifest.xml
             app.json
             package.json
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug.apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
