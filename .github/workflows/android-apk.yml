@@ -10,7 +10,6 @@ jobs:
       CI: 1
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
-      # Safe dummy so builds don't crash if your app reads it at build time:
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
 
     steps:
@@ -42,13 +41,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm i
-          fi
+          if [ -f package-lock.json ]; then npm ci; else npm i; fi
 
-      # Use a minimal, image-free app.json to avoid PNG/CRC issues during prebuild
+      # Minimal image-free app.json to avoid PNG processing issues
       - name: Force minimal image-free app.json
         shell: bash
         run: |
@@ -98,14 +93,28 @@ jobs:
           echo "---- android/gradle.properties ----"
           cat android/gradle.properties
 
-      # Ensure SDK levels are sane for RN 0.74 / AGP 8.x
+      # Patch SDK levels if template didn't set them
       - name: Patch compile/target/min SDK (if needed)
         run: |
           sed -i 's/compileSdkVersion *[0-9][0-9]*/compileSdkVersion 34/g' android/build.gradle || true
           sed -i 's/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g' android/app/build.gradle || true
           sed -i 's/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g' android/app/build.gradle || true
-          echo "---- android/app/build.gradle (sdk lines) ----"
-          grep -nE 'compileSdkVersion|minSdkVersion|targetSdkVersion|namespace|applicationId' android/app/build.gradle || true
+
+      # ✅ FIX for your error: define hermesEnabled if the file references it
+      - name: Define hermesEnabled if missing
+        run: |
+          if grep -q "hermesEnabled" android/app/build.gradle; then
+            if ! grep -q "def hermesEnabled" android/app/build.gradle; then
+              echo "Adding 'def hermesEnabled = true' at top of android/app/build.gradle"
+              sed -i '1idef hermesEnabled = true' android/app/build.gradle
+            else
+              echo "'def hermesEnabled' already present"
+            fi
+            echo "Preview lines mentioning hermesEnabled:"
+            grep -n "hermesEnabled" android/app/build.gradle || true
+          else
+            echo "android/app/build.gradle does not reference hermesEnabled; nothing to do."
+          fi
 
       # Build and always capture logs so we can debug if it fails
       - name: Build debug APK (verbose, save logs)
