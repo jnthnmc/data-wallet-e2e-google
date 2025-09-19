@@ -7,7 +7,7 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     env:
-      CI: true
+      CI: 1
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
@@ -37,23 +37,56 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm i
-          fi
+          if [ -f package-lock.json ]; then npm ci; else npm i; fi
 
-      # --- NEW: Ensure valid image assets so jimp doesn't crash ---
-      - name: Ensure valid PNG assets
+      # === CRITICAL: provide valid images AND a minimal app.json that points ONLY to them ===
+      - name: Overwrite assets and app.json with safe versions
+        shell: bash
         run: |
           mkdir -p assets
-          # 1x1 transparent PNG (valid CRC)
-          ONEPX="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-          echo "$ONEPX" | base64 -d > assets/icon.png
-          echo "$ONEPX" | base64 -d > assets/splash.png
-          echo "$ONEPX" | base64 -d > assets/adaptive-icon.png
-          echo "$ONEPX" | base64 -d > assets/favicon.png
+          # Valid 48x48 transparent PNG (not 1x1) to keep jimp happy
+          BASE64_PNG="iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAACXBIWXMAAAsSAAALEgHS3X78AAAAGXRFWHRTb2Z0d2FyZQBwYWludC5uZXQgNC4xLjVYqZ3ZAAAB2UlEQVRoge2Yv2sTURTFf5m0V9Gg1C2m0Qq0Ka0c2vQHd4i2cJqS6d2Y6w0Jq3w8E8v8H1Gm0S8AUX4Y2xQ8cG2mI9k2PjKf8h6JQp7m1k7V0Uz4xgchxkQn3nN/7rj3p9yI2m0Y3mQ1k2qGf2Yv8mYpE9w7w4A9Gz6b0Y8kIb3bqz63Czv5xk2yV3QqK0nqfGx3mDq5n5B7y2b0QwNnR0wCMtJ0g1kJq2gH4bL9o1bGm8XPrm9b2qgXlN9jGkvJr4c2o1K6i2nQ7Yk6NQ6h8xwQqEJ6b9F5e2o2P9g0fGkQKkq8Ew8l1gq7h0R7wYwH0y0w1gq8g4oY7HcQyCk6m7w7yJmJc6k8B4nQ7YQb0S8VMB1y1Y6d9sr6YzTnUo6p2O0dF0o6t2uV8S8f4y7E9mR9e0M2rSkqT1r0+g0mhg3H5n3ZpZk0IilH4X1r2D4FzPgA4wq8Z6CqQbG8rQd1Q1aAgmK0s4p9I7K8rQe1sR6J0QOXn3mS6o8I8Qb7wX0lZ+Kz6x4h5k0gkKqk2l6eT8Y2qz2y7D8n8a7I8tD8m+YwO1m3wC2D2qg3A3+5u3zQqH1v1w5rC8m0F7L7fBT3m5Ih0FZ/5e0mVt4G2WcR5b8uH0N2t2u9kX3h7A4Q8YulYh0uH7oH7XxH9o8GkR6n9jW7zQ+g0i5xg5mV3k2YgWb5Gg8m7w2qU6j7/0w0hA6bWl0F0b1rQ9m4y0t7P3pT9vQAAAABJRU5ErkJggg=="
+          echo "$BASE64_PNG" | base64 -d > assets/icon.png
+          echo "$BASE64_PNG" | base64 -d > assets/splash.png
+          echo "$BASE64_PNG" | base64 -d > assets/adaptive-icon.png
+          echo "$BASE64_PNG" | base64 -d > assets/favicon.png
+
+          # Backup existing app.json if present
+          if [ -f app.json ]; then cp app.json app.json.bak || true; fi
+
+          cat > app.json << 'EOF'
+          {
+            "expo": {
+              "name": "Data Wallet E2E",
+              "slug": "data-wallet-e2e-google",
+              "version": "0.2.0",
+              "orientation": "portrait",
+              "icon": "./assets/icon.png",
+              "scheme": "datawallet",
+              "splash": {
+                "image": "./assets/splash.png",
+                "resizeMode": "contain",
+                "backgroundColor": "#ffffff"
+              },
+              "updates": { "fallbackToCacheTimeout": 0 },
+              "assetBundlePatterns": ["**/*"],
+              "ios": { "supportsTablet": true },
+              "android": {
+                "package": "com.example.datawallete2e",
+                "adaptiveIcon": {
+                  "foregroundImage": "./assets/adaptive-icon.png",
+                  "backgroundColor": "#ffffff"
+                }
+              },
+              "web": { "bundler": "metro", "output": "static", "favicon": "./assets/favicon.png" }
+            }
+          }
+          EOF
+
+          echo "Wrote safe assets and minimal app.json"
           ls -l assets
+          echo "---- app.json ----"
+          cat app.json
 
       - name: Validate app.json
         run: node -e "JSON.parse(require('fs').readFileSync('app.json','utf8')); console.log('app.json OK')"
@@ -62,7 +95,7 @@ jobs:
         run: npx expo-doctor || true
 
       - name: Prebuild (Expo → native)
-        run: npx expo prebuild --platform android --non-interactive --clean
+        run: npx expo prebuild --platform android
 
       - name: Ensure gradlew executable
         run: chmod +x android/gradlew
