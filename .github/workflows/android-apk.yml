@@ -84,9 +84,37 @@ jobs:
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Build debug APK (verbose)
+      # Build with verbose logs and keep going so we can upload logs even if it fails
+      - name: Build debug APK (verbose, save logs)
         working-directory: android
-        run: ./gradlew assembleDebug --stacktrace --info --no-daemon
+        run: |
+          ./gradlew assembleDebug --stacktrace --info --warning-mode all --no-daemon --scan | tee ../gradle-build.log
+        continue-on-error: true
+      
+      # Extract the last error context so it's easy to read in the Actions UI
+      - name: Extract error summary from Gradle log
+        if: always()
+        run: |
+          echo "----- Gradle error summary (last 300 lines with key phrases) -----"
+          tail -n 300 gradle-build.log | sed -n '/FAILURE:/,$p' || true
+          echo "----- Grep common patterns -----"
+          grep -iE "(FAILURE:|What went wrong|Caused by:|A failure occurred|error: |e: |No matching variant|Duplicate class|AAPT|manifest)" gradle-build.log | tail -n 200 || true
+      
+      # Upload full logs and key files so we can diagnose precisely
+      - name: Upload build logs and gradle files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-debug-info
+          path: |
+            gradle-build.log
+            android/build.gradle
+            android/app/build.gradle
+            android/settings.gradle
+            android/gradle.properties
+            android/app/src/main/AndroidManifest.xml
+            app.json
+            package.json
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
