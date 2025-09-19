@@ -10,7 +10,11 @@ jobs:
       CI: 1
       EXPO_NO_TELEMETRY: 1
       EXPO_NO_PROMPT: 1
+      # Safe dummy so build-time reads don't crash:
       EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: dummy.apps.googleusercontent.com
+      # 🚫 Tell expo-modules gradle plugin to skip publishing config in CI
+      EXPO_SKIP_PUBLISHING: 1
+      ORG_GRADLE_PROJECT_expo_skip_publishing: true
 
     steps:
       - name: Checkout
@@ -22,8 +26,6 @@ jobs:
           ls -la
           echo "---- package.json ----"
           [ -f package.json ] && cat package.json || echo "NO package.json at repo root"
-          echo "---- app.json (if present) ----"
-          [ -f app.json ] && cat app.json || echo "NO app.json at repo root"
 
       - name: Setup Node 18
         uses: actions/setup-node@v4
@@ -81,39 +83,64 @@ jobs:
       - name: Ensure gradlew executable
         run: chmod +x android/gradlew
 
-      # Safe defaults for RN/AGP builds + more heap
-      - name: Write gradle.properties (safe defaults)
+      # Safe defaults + JS engine hint
+      - name: Write gradle.properties (safe defaults + hermes)
         run: |
           cat > android/gradle.properties << 'EOF'
           org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           android.enableJetifier=true
           kotlin.code.style=official
+          # Let expo templates know we're using Hermes
+          expo.jsEngine=hermes
+          # Skip publishing config that breaks in some CI setups
+          expo.skipPublishing=true
           EOF
           echo "---- android/gradle.properties ----"
           cat android/gradle.properties
 
-      # Patch SDK levels if template didn't set them
+      # Ensure SDK levels are sane for RN 0.74 / AGP 8.x
       - name: Patch compile/target/min SDK (if needed)
         run: |
           sed -i 's/compileSdkVersion *[0-9][0-9]*/compileSdkVersion 34/g' android/build.gradle || true
           sed -i 's/minSdkVersion *[0-9][0-9]*/minSdkVersion 23/g' android/app/build.gradle || true
           sed -i 's/targetSdkVersion *[0-9][0-9]*/targetSdkVersion 34/g' android/app/build.gradle || true
 
-      # ✅ FIX for your error: define hermesEnabled if the file references it
-      - name: Define hermesEnabled if missing
+      # ✅ Define hermesEnabled both at the root project and inside :app so any plugin can read it
+      - name: Define hermesEnabled in root and app
         run: |
-          if grep -q "hermesEnabled" android/app/build.gradle; then
-            if ! grep -q "def hermesEnabled" android/app/build.gradle; then
-              echo "Adding 'def hermesEnabled = true' at top of android/app/build.gradle"
-              sed -i '1idef hermesEnabled = true' android/app/build.gradle
-            else
-              echo "'def hermesEnabled' already present"
+          # In root build.gradle, add an ext block if missing
+          if ! grep -q "ext {" android/build.gradle; then
+            echo "Adding 'ext { hermesEnabled = true }' to root android/build.gradle"
+            sed -i '1iext { hermesEnabled = true }' android/build.gradle
+          elif ! grep -q "hermesEnabled" android/build.gradle; then
+            echo "Injecting hermesEnabled into existing ext block"
+            sed -i '0,/ext {/s//ext { hermesEnabled = true\\n/' android/build.gradle
+          fi
+          # In app/build.gradle, define a top-level variable too (older scripts read here)
+          if ! grep -q "^def hermesEnabled" android/app/build.gradle; then
+            echo "Adding 'def hermesEnabled = true' to app/build.gradle"
+            sed -i '1idef hermesEnabled = true' android/app/build.gradle
+          fi
+          echo "---- mentions of hermesEnabled ----"
+          grep -n "hermesEnabled" -n android/build.gradle android/app/build.gradle || true
+
+      # 🧯 Patch expo-modules-core plugin to skip publishing if env says so (avoids 'components.release' issue)
+      - name: Patch expo-modules-core to skip publishing in CI
+        run: |
+          FILE=node_modules/expo-modules-core/android/ExpoModulesCorePlugin.gradle
+          if [ -f "$FILE" ]; then
+            echo "Patching $FILE to guard publishing with env var"
+            # Only add once
+            if ! grep -q "EXPO_SKIP_PUBLISHING" "$FILE"; then
+              # Wrap the publishing block with an if guard
+              sed -i 's/components\.release/ (System.getenv("EXPO_SKIP_PUBLISHING") == "1" ? null : components.release ) /g' "$FILE" || true
+              # Additionally, if the plugin uses components.withVariants, guard it:
+              sed -i 's/components\.withVariants/components.findByName("release") == null \? components : components.withVariants/g' "$FILE" || true
             fi
-            echo "Preview lines mentioning hermesEnabled:"
-            grep -n "hermesEnabled" android/app/build.gradle || true
+            echo "Patched (best-effort)."
           else
-            echo "android/app/build.gradle does not reference hermesEnabled; nothing to do."
+            echo "ExpoModulesCorePlugin.gradle not found; continuing."
           fi
 
       # Build and always capture logs so we can debug if it fails
@@ -133,7 +160,7 @@ jobs:
           echo "----- FAILURE BLOCK -----"
           sed -n '/FAILURE:/,$p' gradle-build.log || true
           echo "----- COMMON ERROR PATTERNS -----"
-          grep -nEi "(AAPT|error: |FAILURE:|What went wrong|Caused by:|Duplicate class|No matching variant|manifest)" gradle-build.log | tail -n 200 || true
+          grep -nEi "(AAPT|error: |FAILURE:|What went wrong|Caused by:|Duplicate class|No matching variant|manifest|hermesEnabled|components\.release)" gradle-build.log | tail -n 200 || true
 
       # Upload APK only if it exists and build succeeded
       - name: Upload APK (if present)
